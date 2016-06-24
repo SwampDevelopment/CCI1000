@@ -1,0 +1,552 @@
+;			Cash Code validator Interface program
+;
+;		*****               REV C               *****	12/08/00
+;
+;		rev B	Modified to correct for trace error on pcb layout , led3 was connected to wrong pin
+;		rev C	Modified to correct for eroneous power up data output, had to deal with page boundaries!
+;
+;Purpose - 	Echo 600 baud serial comunications from validator to host system, and intercept
+;		$50 and $100 dollar bill codes, then replace them with $10 dollar bill codes
+;		to the host system, also output hard meter pulses to count the $50s and $100s. 
+;			10/2000 Silicon Swamp Technology, Bellview Florida
+;			by B T Merchant
+
+;This code is written for the SX28 with a date code of AB9921AA (or later)
+;and requires the SXKEY28L.exe software for assembly and programming.
+;
+;
+; Device
+;
+		device	SX28L,OSCXT5,stackx_optionx,turbo,bor42,protect
+		id	'CCI1000C'
+		reset	initalize
+		freq	50_000_000
+;
+;
+; Equates
+;
+
+
+rx_pin		=	ra.1
+tx_pin		=	ra.2
+led1		=	rc.5
+led2		=	rc.4
+led3		=	rc.2
+led4		=	ra.0
+meter50		=	rc.7
+meter100	=	rc.6
+interupt	=	rb.0
+int_out		=	ra.3
+enable		=	rb.3
+en_out		=	rb.4
+send		=	rb.1
+send_out	=	rb.2
+
+intperiod	=	203			;163 for 40 mips - 203 for 50 mips
+uartfs		=	230400
+num		=	4
+uartbaud	=	600
+uartdivide	=	uartfs/(uartbaud * num)
+uartstdelay	=	uartdivide + (uartdivide/2) + 1
+
+pulse		=	100		;adjust meter pulse timing
+
+
+
+watch		ledcount1,8,udec
+watch		ledcount2,8,udec
+watch		led4,1,ubin		
+watch		tx_pin,1,ubin
+watch		rx_pin,1,ubin
+watch		rxflag,1,ubin
+watch		ra,8,ubin
+watch		rb,8,ubin
+watch		rc,8,ubin
+watch		ctr_50,8,ubin
+watch		mflag,8,ubin
+watch		rxbyte,8,uhex
+watch		temp,8,uhex
+;
+;
+; Variables
+;
+	
+		org	10h			;bank1 variables
+
+serial		=	$
+
+txhigh		ds	1
+txlow		ds	1
+txcount		ds	1
+txdivide	ds	1
+txflag		ds	1
+
+rxcount		ds	1
+rxdivide	ds	1
+rxbyte		ds	1
+byte		ds	1
+rxflag		ds	1
+
+isrmultiplex	ds	1
+ledcount1	ds	1
+ledcount2	ds	1
+temp		ds	1
+divide_50	ds	1
+divide_100	ds	1
+
+rx_flag		=	rxflag.0
+
+
+		org	30h
+meters		=	$
+
+mflag		ds	1
+ctr_50		ds	1
+ctr_50_low	ds	1
+ctr_100		ds	1
+ctr_100_low	ds	1
+
+
+
+
+	
+;
+; Interrupt Service Routine - ISR
+;
+		org	0
+interrupt	
+		break
+		inc	isrmultiplex
+		mov	w,isrmultiplex
+tablestart
+		jmp	pc+w
+		jmp	isrthread1
+		jmp	isrthread2
+		jmp	isrthread3
+		jmp	isrthread2
+		jmp	isrthread1
+		jmp	isrthread2
+		jmp	isrthread3
+		jmp	isrthread2
+		jmp	isrthread1
+		jmp	isrthread2
+		jmp	isrthread3
+		jmp	isrthread2
+		jmp	isrthread1
+		jmp	isrthread2
+		jmp	isrthread3
+		jmp	isrthread2
+
+		mov	isrmultiplex,#255
+		jmp	isrout
+
+
+isrthread1
+
+transmit
+		decsz	txdivide
+		jmp	:txout
+		mov	w,#uartdivide
+		mov	txdivide,w
+		test	txcount
+		snz
+		jmp	:txout
+:txbitclr
+		rr	txhigh
+		rr	txlow
+		dec	txcount
+		snb	txlow.6
+		clrb	tx_pin
+		sb	txlow.6
+		setb	tx_pin
+:txout
+		
+receive
+		sb	rx_pin
+		clc
+		snb	rx_pin
+		stc
+		test	rxcount
+		sz
+		jmp	:rxbit
+		mov	w,#9
+		sc
+		mov	rxcount,w
+		mov	w,#uartstdelay
+		mov	rxdivide,w
+:rxbit
+		decsz	rxdivide
+		jmp	:rxout
+		mov	w,#uartdivide
+		mov	rxdivide,w
+		dec	rxcount
+		sz
+		rr	rxbyte
+		snz
+		setb	rxflag
+	
+		
+:rxout
+		jmp	isrout
+
+isrthread2
+			;life light
+
+		djnz	ledcount1,:ll_down
+		djnz	ledcount2,:ll_down
+	
+		
+		xor	ra,#%0001		;invert test led
+:ll_down
+		jmp	isrout
+
+
+isrthread3
+		bank	meters
+
+		jnb	mflag.0,:down5
+		clrb	mflag.0
+		mov	ctr_50,pulse		;load timing factor
+		and	rc,#%01111111		; turn on meter_50
+:down5		
+		jnb	mflag.1,:bottom5
+		djnz	ctr_50_low,:bottom5
+		djnz	ctr_50,:bottom5
+		or	rc,#%10000000		;turn off meter_50
+		clrb	mflag.1			;signal done with meter pulse
+
+:bottom5
+		
+		jnb	mflag.2,:down1
+		clrb	mflag.2
+		mov	ctr_100,pulse		;load timing factor
+		and	rc,#%10111111		; turn on meter_50
+:down1		
+		jnb	mflag.3,:bottom1
+		djnz	ctr_100_low,:bottom1
+		djnz	ctr_100,:bottom1
+		or	rc,#%01000000		;turn off meter_50
+		clrb	mflag.3			;signal done with meter pulse
+
+:bottom1
+		bank	serial
+
+
+
+		
+		jmp	isrout		
+
+
+	
+isrout
+isrend
+		mov	w,# -intperiod
+		retiw	
+
+
+
+; Reset entry point
+;
+initalize	
+
+		mov	w,#$1F			;initalise the mode reg
+		mov	m,w
+
+
+
+		MODE	$0E
+		mov	!ra,#%0000		;pullups on port A
+		mov	!rb,#%00000000		;pullups on port B
+			
+		MODE	$0F
+		mov	 ra,#%1111		;init ra
+		mov	!ra,#%0010
+
+		mov	 rb,#%11111111		;init rb
+		mov	!rb,#%00001011
+
+		mov	 rc,#%11111111		;init rc
+		mov	!rc,#%00000000
+		
+		
+		
+		clr	fsr			;reset all ram banks
+:loop		setb	fsr.4
+		clr	ind
+		ijnz	fsr,:loop
+
+						
+		mov	!option,#%10011111	;enable rtcc rollover interupt, 256 count
+		
+		bank	serial
+
+
+:delay		
+		djnz	txhigh,:delay
+		djnz	txlow,:delay		;*****	revC	delay a while before running
+
+
+		
+		cc
+		mov	isrmultiplex,#255
+		mov	w,#uartdivide
+		mov	txdivide,w
+		
+		jmp	@main
+
+
+
+;
+;
+;***************
+;* Subroutines *
+;***************
+;
+;
+;***************
+;* get a code from validator
+;
+get_code
+		jb	interupt,:gc_end	;are you sure you got an interupt?
+		clrb	send_out		;tell validator to send a byte
+:loop	
+		sb	rxflag			;do we have the byte?		
+		jmp	:loop
+		clrb	rxflag			;ready for next byte
+		
+
+	
+		cje	rxbyte,#$81,:service_1
+		cje	rxbyte,#$82,:service_2		
+		cje	rxbyte,#$83,:service_5
+		cje	rxbyte,#$84,:service_10		
+		cje	rxbyte,#$85,:service_20
+		cje	rxbyte,#$86,:service_50		
+		cje	rxbyte,#$87,:service_100
+		jmp	:gc_end
+
+;						if not a $50 or $100, pass it on
+		
+:service_1
+		and	rc,#%11000011		;prep led out
+		or	rc,#%11110000
+		jmp	:gc_end
+
+
+:service_2
+		and	rc,#%11000011		;prep led out
+		or	rc,#%11101100
+		jmp	:gc_end
+
+
+:service_5
+		and	rc,#%11000011		;prep led out
+		or	rc,#%11100000
+		jmp	:gc_end
+
+
+:service_10
+		and	rc,#%11000011		;prep led out
+		or	rc,#%11011100
+		jmp	:gc_end
+
+
+:service_20
+		and	rc,#%11000011		;prep led out
+		or	rc,#%11010000
+		jmp	:gc_end
+
+
+		
+:service_50
+	
+	
+		setb	send_out		;tell val got the first byte
+
+:s50_top	
+		jnb	interupt,:s50_top
+		clrb	send_out		
+:loop2	
+		sb	rxflag			;do we have the byte?		
+		jmp	:loop2
+		clrb	rxflag			;ready for next byte
+		cjne	rxbyte,#$89,errata
+		setb	send_out		;tell val got byte two
+
+		bank	meters
+		and	rc,#%11000011		;prep led out
+		or	rc,#%11001100
+
+		setb	mflag.0			;flag for meter pulse
+		setb	mflag.1
+
+		bank	serial
+
+		mov	divide_50,#5
+:s50_mid1	
+		nop
+		nop
+		
+		djnz	ledcount1,:s50_mid1	
+		mov	temp,#$84
+		call	@send_byte
+		
+:s50_mid2
+		nop
+		nop
+		
+		
+		djnz	ledcount1,:s50_mid2
+		mov	temp,#$89
+		call	@send_byte
+		djnz	divide_50,:s50_mid1		
+	
+	
+		
+		jmp	:service_bottom
+
+	
+:service_100	
+			
+		setb	send_out		;tell val got the first byte
+
+:s100_top	
+		jnb	interupt,:s100_top
+		clrb	send_out		
+:loop3	
+		sb	rxflag			;do we have the byte?		
+		jmp	:loop3
+		clrb	rxflag			;ready for next byte
+		cjne	rxbyte,#$89,errata
+		setb	send_out		;tell val got byte two
+
+		bank	meters
+
+		and	rc,#%11000011		;prep led out
+		or	rc,#%11000000
+
+		setb	mflag.2			;flag for meter pulse
+		setb	mflag.3
+
+		bank	serial
+
+
+		mov	divide_100,#5
+:s100_mid1	
+		nop
+		nop
+		
+		djnz	ledcount1,:s100_mid1	
+		mov	temp,#$85
+		call	@send_byte
+		
+:s100_mid2
+		nop
+		nop
+		
+		
+		djnz	ledcount1,:s100_mid2
+		mov	temp,#$89
+		call	@send_byte
+		djnz	divide_100,:s100_mid1		
+	
+	
+		
+		jmp	:service_bottom
+
+:gc_errata
+						;****	added for rev C to ensure only valid data is output
+		cje	temp,#$89,:gc_end
+		cje	temp,#$8A,:gc_end
+		cje	temp,#$8B,:gc_end
+		cje	temp,#$8C,:gc_end
+		cje	temp,#$8D,:gc_end
+		cje	temp,#$8E,:gc_end
+		cje	temp,#$8F,:gc_end
+
+	
+		mov	temp,#$8F		;if data doesnt match known code, send 8F
+
+
+
+:gc_end
+		mov	temp,rxbyte
+		call	@send_byte
+		
+
+		
+
+:service_bottom
+
+		retp
+
+
+		org	$200
+
+
+
+;***************
+;* send byte via serial port
+;
+send_byte
+		
+		bank	serial
+:loop
+		clrb	int_out
+		snb	send			;wait for host ready
+		jmp	:loop
+
+
+:wait		test	txcount			;wait for not busy
+		jnz	:wait
+		xor	temp,#%11111111		;invert byte to xmit - used to xmit rs232
+		mov	txhigh,temp
+		setb	txlow.7			;clr start bit - set to invert for rs232
+		mov	txcount,#10		;1 start 8 data 1 stop
+:loop2
+		
+		sb	send
+		jmp	:loop2
+
+		setb	int_out			;experiment
+
+		setb	send_out		;pass it on
+:loop3
+		sb	interupt
+		jmp	:loop3
+		
+
+
+		retp
+
+;
+;
+
+
+
+main
+		sb	enable
+		clrb	en_out
+		snb	enable
+		setb	en_out
+		sb	interupt
+		call	@get_code
+		clr	txhigh			;***	added for rev C to ensure buffers always clear except when in use
+		clr	txlow
+		clr	temp
+		clr	txcount
+		clr	rxbyte
+		clr	rxcount
+		jmp	main
+
+
+
+
+
+
+errata
+
+program_end
+		jmp	program_end		;loop hault program
+
+;thats all folks
